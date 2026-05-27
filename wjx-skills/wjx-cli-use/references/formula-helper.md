@@ -1,8 +1,3 @@
----
-name: wjx-ai-formula-helper
-description: "问卷星计算公式与Excel函数功能指南，帮助AI在问卷中正确编写计算公式。涵盖题目引用、数组写法、赋值判断逻辑、各题型的推送数据格式、函数参考（日期时间/数学计算/文本合并/条件判断/逻辑/查找统计）及实战案例。Use when the user mentions: 计算公式/公式/函数/计算/赋值/判断/隐藏题/题目引用/[q1]/SUM/IF/COUNTIF — or asks to write formulas, set validations, or configure auto-fill logic in a Wenjuanxing survey."
----
-
 # 问卷星计算公式指南
 
 问卷星中的计算公式功能来源于Excel，但针对问卷场景做了适配。本指南覆盖题目引用规则、语法规范、函数参考、各题型推送数据格式以及实战案例。
