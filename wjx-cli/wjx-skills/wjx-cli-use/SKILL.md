@@ -11,6 +11,15 @@ wjx-cli 是问卷星 OpenAPI 的命令行工具。命令格式：`wjx <模块> <
 
 ## AI Agent 行为准则（必读）
 
+### 规则 0：创建问卷只用 `create-by-json`（强制）
+
+**禁止使用 `wjx survey create-by-text`**——除非用户用"DSL"、"文本格式"等字眼明确要求。原因：
+- DSL 文本格式覆盖题型不全（70+ 题型 vs DSL 27 种）
+- DSL 容易被 shell 转义破坏（PowerShell 的 `$1/$2` 会被识别为变量丢失）
+- `create-by-text` 已弃用，CLI 入口会打印弃用警告
+
+正确做法：把题目写成 JSONL（每行一个 JSON 对象，首行 `qtype:"问卷基础信息"` 元数据），调用 `wjx survey create-by-json --file <path>.jsonl`。所有题型、投票、考试、表单都走这一条路径。
+
 ### 规则 1：一个需求 = 一个问卷
 
 无论用户要求多少种题型，**必须在一次 `create-by-json` 调用中包含所有题目**。一个问卷可包含任意数量、任意类型的题目。
@@ -29,6 +38,59 @@ CLI 是你（AI）在后台执行的工具，**不要**在回复中展示命令�
 
 - 正确：「问卷已创建，这是填写链接：https://...」
 - 错误：「你可以运行 `wjx survey list` 查看问卷列表」
+
+### 规则 5：未配置或返回 API Key 错误时先提醒配置
+
+在安装/初始化流程、用户明确要求检查配置，或命令实际返回 API Key 相关错误时，引导用户处理 API Key。
+
+- **未配置 API Key**：如果命令返回未配置错误，停止当前业务操作，提醒用户先获取并配置 API Key，不要继续尝试创建、查询、导出等需要鉴权的命令
+- **Key 错误或过期**：提醒用户重新获取 API Key，并在配置成功后继续原任务
+- **已返回 API Key 相关错误**：如果命令返回 `API Key is required`、`Invalid API Key`、`appkey error` 或类似鉴权错误，必须立刻向用户说明需要处理 API Key，并给出获取/重新配置 API Key 的下一步；不要只复述错误信息
+- **获取 API Key**：让用户访问 `https://<域名>/weixinlogin.aspx?redirecturl=%2Fnewwjx%2Fmanage%2Fuserinfo.aspx%3FshowApiKey%3D1`，默认域名为 `www.wjx.cn`
+- **配置方式**：用户提供 Key 后，由 AI 在后台执行 `wjx init --api-key <key>`；不要让用户自己敲命令，除非用户明确要求
+
+收到 API Key 相关错误后的用户提醒应使用自然语言，例如：
+
+```
+刚才的操作返回了 API Key 相关错误，说明当前还没有配置 API Key，或者 Key 已失效。请先打开下面的链接获取/重新获取 API Key，拿到后发给我，我再继续帮你完成后续操作：
+https://www.wjx.cn/weixinlogin.aspx?redirecturl=%2Fnewwjx%2Fmanage%2Fuserinfo.aspx%3FshowApiKey%3D1
+```
+
+### 规则 6：发布与提交答卷的几个易错点
+
+- **发布问卷状态参数**：用 `wjx survey status --vid <vid> --state 1`（1=发布、2=暂停、3=删除）。`--status` 是兼容别名，但默认参数名是 `--state`。
+- **提交答卷必须带版本号**：问卷被发布/编辑后 `version` 自增，提交时不带最新 `jpmversion` 会被服务端拒绝并报"问卷已被修改请刷新"。`wjx response submit` 默认会自动获取最新版本注入，请**不要**加 `--no-auto-version`，也不需要手动算版本号。
+- **submitdata 题号一律用 `submit-template` 返回的 q_index**：问卷星服务端严格按 `getSurvey` 返回的原始 `q_index` 校验提交的题号（"问卷基础信息"元数据占 q_index=1，真实题目从 2 开始编号）。**手算很容易搞错**——直接跑 `wjx response submit-template --vid <问卷ID>`，每题的 `placeholder` 就是正确格式，改成真实答案即可。选项序号仍然是 1-based（从 1 数到 N）。
+- **避开 shell `$` 转义陷阱**：submitdata 含 `$` 分隔符，PowerShell 双引号会把 `$1/$3` 当变量吞掉。**首选** `--submitdata-file <path>`（从文件读，彻底绕开 shell）；其次用 PowerShell 单引号 `--submitdata '1$1}2$3'`。CLI 会在提交前做 `$` sanity check：一个 `$` 都没有时立刻报 INPUT_ERROR。
+
+### 规则 7：批量 submit 必须逐次确认成功/失败（强制）
+
+**反例**：用户说"模拟 10 份答卷"，AI 顺序跑 10 次 `wjx response submit`，**只有 1 次返回 `result:true`**，但 AI 仍然报告"已提交 10 份"——这是欺骗用户，下游基于错误事实做决策（如生成 PPT 报告），导致总数与实际入库数不一致，**问题非常致命**。
+
+**正确做法**：
+
+```
+计划提交 N 条
+  ├─ for i in 1..N:
+  │   ├─ wjx response submit ...  → 拿 stdout JSON
+  │   ├─ 检查 result === true 才算成功
+  │   ├─ result === false 时记 errormsg（IP 限制/重复提交/校验失败/问卷未发布）
+  │   └─ 累加 succeeded / failed
+  └─ 报告："计划 N，成功 M，失败 N-M"。
+     失败 ≥ 10% 时主动列出 errormsg 分布 + 建议（换 IP / 调"重复提交"设置）。
+```
+
+**绝不口述未核实的数字**。如果不确定，跑 `wjx response query --vid <vid>` 核对实际入库明细；生成 PPT 报告时，样本量仍以 `survey.answer_valid` 作为有效答卷数权威口径。
+
+**常见拦截原因**（要如实告诉用户）：
+- 同 IP / 同设备短时间多次提交被风控
+- 问卷"重复提交"设置开启
+- 必填项缺失或校验不通过
+- 问卷未发布 / 已暂停 / 已关闭
+- **矩阵题可复制示例**：行号!列号，多行用 `,`，多列用 `|`：
+  - 矩阵单选 3×4：`6$1!1,2!3,3!2`
+  - 矩阵多选 3 行：`7$1!1|2,2!3,3!1|4`
+  - 矩阵量表 3 行：`8$1!5,2!4,3!3`
 
 ## 快速路由
 
@@ -156,8 +218,8 @@ JSONL 每行一道题（首行可放 `{"_meta":{"title":"...","description":"...
 
 | 错误信息 | 原因 | 解决方案 |
 |---------|------|---------|
-| `API Key is required` | 未配置 API Key | `wjx init --api-key <key>` |
-| `Invalid API Key` / "appkey error" | Key 错误或过期 | 重新获取（见步骤 2） |
+| `API Key is required` | 未配置 API Key | 停止当前业务操作，明确提醒用户去获取并配置 API Key；用户提供后执行 `wjx init --api-key <key>` |
+| `Invalid API Key` / "appkey error" | Key 错误或过期 | 明确提醒用户重新获取 API Key（见步骤 2），配置成功后继续原任务 |
 | `vid is required` | 未指定问卷 ID | 先 `wjx survey list` 获取 vid |
 | `Corp ID is required` | 通讯录操作需企业 ID | `wjx init` 配置 `WJX_CORP_ID` |
 | `Network Error` / 超时 | 网络不通或 base_url 错误 | `wjx doctor` 检查，`--dry-run` 预览 |
@@ -171,4 +233,5 @@ JSONL 每行一道题（首行可放 `{"_meta":{"title":"...","description":"...
 - [通讯录命令](references/contacts-commands.md) — 联系人、部门、管理员、标签、子账号、SSO
 - [分析命令](references/analytics-commands.md) — NPS/CSAT/CES 公式、异常检测、数据解码
 - [题型编码](references/question-types.md) — 完整 q_type/q_subtype 映射表
+- [计算公式](references/formula-helper.md) — 问卷星计算公式与Excel函数功能指南，帮助AI在问卷中正确编写计算公式。涵盖题目引用、数组写法、赋值判断逻辑、各题型的推送数据格式、函数参考（日期时间/数学计算/文本合并/条件判断/逻辑/查找统计）及实战案例。
 - [安装 Node.js](references/install-nodejs.md) — 各平台 Node.js 安装方式
